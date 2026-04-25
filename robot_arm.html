@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Kolu (Ters Kinematik) Simülasyonu</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #0f172a; color: #cbd5e1; font-family: 'Courier New', Courier, monospace; }
+        
+        /* Sol Kontrol Paneli */
+        #panel {
+            position: absolute; top: 0; left: 0; width: 350px; height: 100vh;
+            background: rgba(15, 23, 42, 0.9); border-right: 1px solid #334155;
+            padding: 20px; box-sizing: border-box; overflow-y: auto; z-index: 10;
+        }
+        
+        h1 { color: #38bdf8; font-size: 18px; text-transform: uppercase; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        
+        button {
+            width: 100%; background: #0ea5e9; color: white; border: none;
+            padding: 12px; font-size: 14px; font-weight: bold; font-family: inherit;
+            cursor: pointer; transition: 0.2s; margin-bottom: 20px;
+        }
+        button:hover { background: #0284c7; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+
+        /* YENİ: EKSEN GÖSTERGELERİ (AXIS INDICATORS) */
+        .axis-panel { display: flex; gap: 10px; margin-bottom: 20px; }
+        .axis-box {
+            flex: 1; text-align: center; padding: 10px 0; border-radius: 5px;
+            background: #1e293b; border: 2px solid #334155; color: #475569;
+            font-weight: bold; transition: all 0.1s;
+        }
+        /* Eksen hareket edince yanacak sınıflar */
+        .axis-box.active-xz {
+            background: rgba(16, 185, 129, 0.2); border-color: #10b981;
+            color: #10b981; box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+        }
+        .axis-box.active-y {
+            background: rgba(244, 63, 94, 0.2); border-color: #f43f5e;
+            color: #f43f5e; box-shadow: 0 0 20px rgba(244, 63, 94, 0.5);
+        }
+
+        .data-box {
+            background: #1e293b; border: 1px solid #334155; border-left: 3px solid #38bdf8;
+            padding: 10px; margin-bottom: 15px; font-size: 12px;
+        }
+        .data-box h3 { margin: 0 0 5px 0; color: #94a3b8; font-size: 11px; }
+        .val-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+        .val-label { color: #64748b; }
+        .val-num { color: #38bdf8; font-weight: bold; }
+        .val-num.err { color: #f43f5e; }
+
+        #canvas-container { position: absolute; top: 0; left: 350px; width: calc(100vw - 350px); height: 100vh; }
+        #target-marker { position: absolute; width: 20px; height: 20px; border: 1px solid #f43f5e; border-radius: 50%; pointer-events: none; z-index: 5; display: none; transform: translate(-50%, -50%); }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="panel">
+        <h1>IK Robot Controller</h1>
+        <button id="connectBtn">SYS.CONNECT()</button>
+        <div id="status" style="color: #f43f5e; font-size: 12px; text-align: center; margin-bottom: 15px;">OFFLINE</div>
+
+        <!-- HAREKETLİ EKSEN PANELLERİ -->
+        <div class="axis-panel">
+            <div class="axis-box" id="ax-xz">GÖVDE (X-Z) DÖNÜŞÜ</div>
+            <div class="axis-box" id="ax-y">KOL (Y) YÜKSEKLİĞİ</div>
+        </div>
+
+        <div class="data-box">
+            <h3>[01] SENSOR INPUT (DEMA FILTERED)</h3>
+            <div class="val-row"><span class="val-label">Pitch (Y Eğimi):</span> <span class="val-num" id="s-pitch">0.00°</span></div>
+            <div class="val-row"><span class="val-label">Roll (X Eğimi):</span> <span class="val-num" id="s-roll">0.00°</span></div>
+        </div>
+
+        <div class="data-box">
+            <h3>[02] TARGET VECTOR (XYZ)</h3>
+            <div class="val-row"><span class="val-label">X (Reach):</span> <span class="val-num" id="t-x">0.00</span></div>
+            <div class="val-row"><span class="val-label">Y (Height):</span> <span class="val-num" id="t-y">0.00</span></div>
+            <div class="val-row"><span class="val-label">Z (Depth):</span> <span class="val-num" id="t-z">0.00</span></div>
+        </div>
+
+        <div class="data-box">
+            <h3>[03] INVERSE KINEMATICS (JOINTS)</h3>
+            <div class="val-row"><span class="val-label">θ1 (Base Yaw):</span> <span class="val-num" id="j-base">0.00°</span></div>
+            <div class="val-row"><span class="val-label">θ2 (Shoulder):</span> <span class="val-num" id="j-shoulder">0.00°</span></div>
+            <div class="val-row"><span class="val-label">θ3 (Elbow):</span> <span class="val-num" id="j-elbow">0.00°</span></div>
+        </div>
+
+        <div class="data-box">
+            <h3>[04] PHYSICS INTERPOLATION</h3>
+            <div class="val-row"><span class="val-label">Method:</span> <span class="val-num" style="color:#10b981;">HEAVY LERP (t=0.015)</span></div>
+            <div class="val-row"><span class="val-label">End-Effector Vel:</span> <span class="val-num" id="p-vel">0.00 m/s</span></div>
+            <div class="val-row"><span class="val-label">IK Error:</span> <span class="val-num err" id="p-err">0.00 mm</span></div>
+        </div>
+        
+    </div>
+
+    <div id="canvas-container"></div>
+    <div id="target-marker"></div>
+
+    <script>
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0f172a, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+        camera.position.set(12, 8, 12);
+        camera.lookAt(0, 3, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0x334155, 1);
+        scene.add(ambientLight);
+        const spotLight = new THREE.SpotLight(0xffffff, 1.5);
+        spotLight.position.set(10, 20, 10);
+        spotLight.castShadow = true;
+        scene.add(spotLight);
+
+        const gridHelper = new THREE.GridHelper(20, 20, 0x38bdf8, 0x1e293b);
+        scene.add(gridHelper);
+
+        const matDark = new THREE.MeshPhongMaterial({ color: 0x1e293b, flatShading: true });
+        const matLight = new THREE.MeshPhongMaterial({ color: 0x94a3b8, flatShading: true });
+        const matAccent = new THREE.MeshPhongMaterial({ color: 0x38bdf8 });
+        
+        const L1 = 4.0;
+        const L2 = 4.0;
+
+        const robot = new THREE.Group();
+        scene.add(robot);
+
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2, 1, 16), matDark);
+        base.position.y = 0.5;
+        base.castShadow = true;
+        robot.add(base);
+
+        const shoulderJoint = new THREE.Group();
+        shoulderJoint.position.y = 1;
+        base.add(shoulderJoint);
+        const shoulderMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), matAccent);
+        shoulderJoint.add(shoulderMesh);
+
+        const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.8, L1, 0.8), matLight);
+        upperArm.position.y = L1 / 2;
+        upperArm.castShadow = true;
+        shoulderJoint.add(upperArm);
+
+        const elbowJoint = new THREE.Group();
+        elbowJoint.position.y = L1;
+        shoulderJoint.add(elbowJoint);
+        const elbowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.8, 16, 16), matAccent);
+        elbowJoint.add(elbowMesh);
+
+        const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.6, L2, 0.6), matLight);
+        forearm.position.y = L2 / 2;
+        forearm.castShadow = true;
+        elbowJoint.add(forearm);
+
+        const wrist = new THREE.Group();
+        wrist.position.y = L2;
+        elbowJoint.add(wrist);
+        const wristMesh = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.2), matDark);
+        wrist.add(wristMesh);
+        
+        const clawLeft = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 0.4), matAccent);
+        clawLeft.position.set(-0.4, 0.75, 0);
+        wrist.add(clawLeft);
+        
+        const clawRight = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 0.4), matAccent);
+        clawRight.position.set(0.4, 0.75, 0);
+        wrist.add(clawRight);
+
+        const targetSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.3, 8, 8), 
+            new THREE.MeshBasicMaterial({ color: 0xf43f5e, wireframe: true })
+        );
+        scene.add(targetSphere);
+
+        let targetYaw = 0;
+        let targetX_2D = 5.0;
+        let targetY_2D = 4.0;
+
+        let currentTheta1 = 0;
+        let currentTheta2 = 0;
+        let currentTheta3 = 0;
+        let lastEndEffectorY = 0;
+
+        function solveIK(tx, ty) {
+            let distSq = tx * tx + ty * ty;
+            const maxReach = L1 + L2 - 0.01;
+            if (distSq > maxReach * maxReach) {
+                const ratio = maxReach / Math.sqrt(distSq);
+                tx *= ratio; ty *= ratio;
+                distSq = tx * tx + ty * ty;
+            }
+            let cosTheta3 = (distSq - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+            cosTheta3 = Math.max(-1, Math.min(1, cosTheta3));
+            let theta3 = Math.acos(cosTheta3); 
+            let k1 = L1 + L2 * Math.cos(theta3);
+            let k2 = L2 * Math.sin(theta3);
+            let theta2 = Math.atan2(ty, tx) - Math.atan2(k2, k1);
+            return { shoulder: theta2 - Math.PI / 2, elbow: theta3 };
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const ikSolution = solveIK(targetX_2D, targetY_2D);
+            
+            // AŞIRI YUMUŞAK GEÇİŞ (HEAVY LERP)
+            // t değerini 0.05'ten 0.015'e düşürdük. Çok daha ağır ve sarsılmaz.
+            const t = 0.015; 
+            currentTheta1 += (targetYaw - currentTheta1) * t;
+            currentTheta2 += (ikSolution.shoulder - currentTheta2) * t;
+            currentTheta3 += (ikSolution.elbow - currentTheta3) * t;
+
+            base.rotation.y = currentTheta1;
+            shoulderJoint.rotation.z = currentTheta2;
+            elbowJoint.rotation.z = currentTheta3;
+
+            targetSphere.position.set(
+                Math.sin(currentTheta1) * targetX_2D,
+                targetY_2D + 1,
+                Math.cos(currentTheta1) * targetX_2D
+            );
+
+            document.getElementById('j-base').innerText = (currentTheta1 * 180 / Math.PI).toFixed(2) + "°";
+            document.getElementById('j-shoulder').innerText = (currentTheta2 * 180 / Math.PI).toFixed(2) + "°";
+            document.getElementById('j-elbow').innerText = (currentTheta3 * 180 / Math.PI).toFixed(2) + "°";
+
+            const vel = Math.abs(targetSphere.position.y - lastEndEffectorY) * 60;
+            lastEndEffectorY = targetSphere.position.y;
+            document.getElementById('p-vel').innerText = vel.toFixed(2) + " m/s";
+
+            const wristPos = new THREE.Vector3();
+            wrist.getWorldPosition(wristPos);
+            const err = wristPos.distanceTo(targetSphere.position);
+            const errElem = document.getElementById('p-err');
+            errElem.innerText = (err * 100).toFixed(2) + " mm";
+            errElem.style.color = err > 0.5 ? "#f43f5e" : "#10b981";
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+
+        let port, reader, keepReading = true;
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+
+        // YENİ: DEMA (DOUBLE EMA) AŞIRI FİLTRELEME
+        let ema1Roll = 0, ema2Roll = 0;
+        let ema1Pitch = 0, ema2Pitch = 0;
+        
+        // HAREKET ALGILAMA (TÜREV)
+        let lastEmaRoll = 0, lastEmaPitch = 0;
+        const axXZ = document.getElementById('ax-xz');
+        const axY = document.getElementById('ax-y');
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                statusDiv.innerText = "ONLINE (ULTRA SMOOTH)";
+                statusDiv.style.color = "#10b981";
+                connectBtn.disabled = true;
+                keepReading = true; readLoop();
+            } catch (err) {}
+        });
+
+        async function readLoop() {
+            const textDecoder = new TextDecoderStream();
+            port.readable.pipeTo(textDecoder.writable);
+            reader = textDecoder.readable.getReader();
+            let buffer = "";
+            try {
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += value;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); 
+
+                    for (const line of lines) {
+                        const parts = line.split('\t').map(i => i.trim()).filter(i => i);
+                        if (parts[0] === "DATA" && parts.length >= 3) {
+                            const rawRoll = parseFloat(parts[1]);
+                            const rawPitch = parseFloat(parts[2]);
+                            
+                            if (!isNaN(rawRoll) && !isNaN(rawPitch)) {
+                                
+                                // DEMA FİLTRESİ (AŞIRI YUMUŞATMA)
+                                const alpha = 0.05; // 1. seviye süzme (çok küçük değer = çok süzme)
+                                ema1Roll = ema1Roll * (1 - alpha) + rawRoll * alpha;
+                                ema2Roll = ema2Roll * (1 - alpha) + ema1Roll * alpha;
+                                
+                                ema1Pitch = ema1Pitch * (1 - alpha) + rawPitch * alpha;
+                                ema2Pitch = ema2Pitch * (1 - alpha) + ema1Pitch * alpha;
+
+                                document.getElementById('s-roll').innerText = ema2Roll.toFixed(2) + "°";
+                                document.getElementById('s-pitch').innerText = ema2Pitch.toFixed(2) + "°";
+
+                                // AKTİF EKSEN AYDINLATMA (TÜREV KONTROLÜ)
+                                // O anki hızına (türevine) bakıyoruz
+                                const diffRoll = Math.abs(ema2Roll - lastEmaRoll);
+                                const diffPitch = Math.abs(ema2Pitch - lastEmaPitch);
+                                
+                                // Hassasiyet eşiği: 0.02 dereceden fazla değişiyorsa hareket ediyor demektir
+                                if (diffRoll > 0.02) axXZ.classList.add('active-xz');
+                                else axXZ.classList.remove('active-xz');
+
+                                if (diffPitch > 0.02) axY.classList.add('active-y');
+                                else axY.classList.remove('active-y');
+
+                                lastEmaRoll = ema2Roll;
+                                lastEmaPitch = ema2Pitch;
+
+                                // UZAYSAL MAPPING
+                                targetYaw = (ema2Roll / 30) * (Math.PI / 2);
+                                targetYaw = Math.max(-Math.PI/2, Math.min(Math.PI/2, targetYaw));
+
+                                targetY_2D = 4 - (ema2Pitch / 30) * 4;
+                                targetY_2D = Math.max(0.5, Math.min(7.5, targetY_2D));
+
+                                document.getElementById('t-x').innerText = (Math.sin(targetYaw) * targetX_2D).toFixed(2);
+                                document.getElementById('t-y').innerText = targetY_2D.toFixed(2);
+                                document.getElementById('t-z').innerText = (Math.cos(targetYaw) * targetX_2D).toFixed(2);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {}
+        }
+    </script>
+</body>
+</html>

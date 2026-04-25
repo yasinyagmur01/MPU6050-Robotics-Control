@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPU6050 Sensör Oyunu</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB; /* Gökyüzü mavisi */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        #top-panel {
+            position: absolute;
+            top: 20px; left: 20px;
+            background: rgba(0,0,0,0.6);
+            padding: 15px 25px;
+            border-radius: 10px;
+            pointer-events: auto;
+        }
+        button {
+            background: #f1c40f;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-bottom: 10px;
+            width: 100%;
+        }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; }
+        
+        #score-display {
+            position: absolute;
+            top: 20px; right: 30px;
+            font-size: 40px;
+            font-weight: bold;
+            text-shadow: 2px 2px 0 #000;
+        }
+        
+        #game-over {
+            display: none;
+            text-align: center;
+            background: rgba(0,0,0,0.8);
+            padding: 40px;
+            border-radius: 20px;
+            border: 3px solid #e74c3c;
+            pointer-events: auto;
+        }
+        #game-over h1 { color: #e74c3c; margin-top: 0; font-size: 40px; }
+        #restart-btn { background: #2ecc71; color: white; margin-top: 20px; font-size: 20px; padding: 15px; }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="top-panel">
+            <button id="connectBtn">🎮 Sensöre Bağlan</button>
+            <div id="status" style="color: #f1c40f;">Sensör bekleniyor...</div>
+            <div style="margin-top: 10px; font-size: 14px; color: #ccc;">
+                <b>Oynanış:</b> Sensörün burnunu (Pitch) aşağı-yukarı eğerek uçağı kontrol edin.
+            </div>
+        </div>
+
+        <div id="game-over">
+            <h1>ÇARPTIN!</h1>
+            <p style="font-size: 24px;">Skor: <span id="final-score">0</span></p>
+            <button id="restart-btn">Tekrar Oyna</button>
+        </div>
+    </div>
+
+    <div id="score-display">0</div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- OYUN DEĞİŞKENLERİ ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let gameActive = false;
+        let score = 0;
+        let sensorPitch = 0; // Sensörden gelen anlık pitch
+        
+        // Kuş (Uçak) Özellikleri
+        const bird = {
+            x: window.innerWidth * 0.2, // Ekranın soluna yakın
+            y: window.innerHeight / 2,
+            targetY: window.innerHeight / 2, // Sensörün hedeflediği yükseklik
+            width: 50,
+            height: 30,
+            color: '#f1c40f'
+        };
+
+        // Engeller (Borular)
+        let pipes = [];
+        const pipeWidth = 80;
+        const pipeGap = 300; // ÇOK GENİŞ BOŞLUK (Kolay mod)
+        const pipeSpeed = 4; // Yavaş hız
+
+        // --- OYUN DÖNGÜSÜ ---
+        function resetGame() {
+            pipes = [];
+            score = 0;
+            document.getElementById('score-display').innerText = score;
+            document.getElementById('game-over').style.display = 'none';
+            gameActive = true;
+            spawnPipe();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function spawnPipe() {
+            // Boşluğun y pozisyonunu rastgele belirle
+            const minPipeHeight = 50;
+            const maxPos = canvas.height - minPipeHeight - pipeGap;
+            const gapY = Math.random() * (maxPos - minPipeHeight) + minPipeHeight;
+
+            pipes.push({
+                x: canvas.width,
+                topHeight: gapY,
+                bottomY: gapY + pipeGap,
+                passed: false
+            });
+        }
+
+        function drawBird() {
+            ctx.save();
+            ctx.translate(bird.x, bird.y);
+            
+            // Sensör eğimine göre uçağı da hafifçe döndür
+            let rotation = (bird.targetY - bird.y) * 0.01;
+            ctx.rotate(Math.max(-0.5, Math.min(0.5, rotation))); 
+
+            // Basit uçak çizimi
+            ctx.fillStyle = bird.color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, bird.width/2, bird.height/2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Kokpit
+            ctx.fillStyle = '#2980b9';
+            ctx.beginPath();
+            ctx.arc(10, -5, 8, 0, Math.PI, true);
+            ctx.fill();
+            
+            // Kuyruk
+            ctx.fillStyle = '#e67e22';
+            ctx.fillRect(-bird.width/2 - 10, -10, 15, 10);
+
+            ctx.restore();
+        }
+
+        function drawPipes() {
+            ctx.fillStyle = '#2ecc71'; // Yeşil borular
+            ctx.strokeStyle = '#27ae60';
+            ctx.lineWidth = 4;
+
+            for (let i = 0; i < pipes.length; i++) {
+                let p = pipes[i];
+                
+                // Üst boru
+                ctx.fillRect(p.x, 0, pipeWidth, p.topHeight);
+                ctx.strokeRect(p.x, 0, pipeWidth, p.topHeight);
+                // Üst boru başlığı
+                ctx.fillRect(p.x - 5, p.topHeight - 20, pipeWidth + 10, 20);
+
+                // Alt boru
+                ctx.fillRect(p.x, p.bottomY, pipeWidth, canvas.height - p.bottomY);
+                ctx.strokeRect(p.x, p.bottomY, pipeWidth, canvas.height - p.bottomY);
+                // Alt boru başlığı
+                ctx.fillRect(p.x - 5, p.bottomY, pipeWidth + 10, 20);
+            }
+        }
+
+        function updateGame() {
+            // Sensör pitch değerini ekran yüksekliğine çevir (-40 derece ile +40 derece arası)
+            // Burnunu kaldırınca (pozitif pitch) yukarı çıksın, indirince aşağı
+            let mappedY = mapRange(sensorPitch, 40, -40, 50, canvas.height - 50);
+            
+            // Sınırları aşmasını engelle
+            mappedY = Math.max(bird.height, Math.min(canvas.height - bird.height, mappedY));
+            
+            bird.targetY = mappedY;
+            
+            // Yumuşak hareket (Smoothing)
+            bird.y += (bird.targetY - bird.y) * 0.1;
+
+            // Boruları hareket ettir
+            for (let i = pipes.length - 1; i >= 0; i--) {
+                pipes[i].x -= pipeSpeed;
+
+                // Çarpışma kontrolü (Bird box collision)
+                let p = pipes[i];
+                let birdLeft = bird.x - bird.width/2 + 5;
+                let birdRight = bird.x + bird.width/2 - 5;
+                let birdTop = bird.y - bird.height/2 + 5;
+                let birdBottom = bird.y + bird.height/2 - 5;
+
+                // X ekseni kesişimi
+                if (birdRight > p.x && birdLeft < p.x + pipeWidth) {
+                    // Y ekseni kesişimi (Boşlukta değilse çarpmıştır)
+                    if (birdTop < p.topHeight || birdBottom > p.bottomY) {
+                        gameOver();
+                    }
+                }
+
+                // Skoru artır
+                if (p.x + pipeWidth < birdLeft && !p.passed) {
+                    score++;
+                    document.getElementById('score-display').innerText = score;
+                    p.passed = true;
+                }
+
+                // Ekrandan çıkanları sil
+                if (p.x + pipeWidth < 0) {
+                    pipes.splice(i, 1);
+                }
+            }
+
+            // Yeni boru üret
+            if (pipes.length === 0 || pipes[pipes.length - 1].x < canvas.width - 400) {
+                spawnPipe();
+            }
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('game-over').style.display = 'block';
+        }
+
+        function gameLoop() {
+            if (!gameActive) return;
+            
+            // Ekranı temizle
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            updateGame();
+            drawPipes();
+            drawBird();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- YARDIMCI FONKSİYONLAR ---
+        function mapRange(value, inMin, inMax, outMin, outMax) {
+            let result = (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+            return result;
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            if(!gameActive) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                drawBird();
+            }
+        });
+
+        document.getElementById('restart-btn').addEventListener('click', () => {
+            if (port && port.readable) {
+                resetGame();
+            } else {
+                alert("Lütfen önce sensöre bağlanın!");
+            }
+        });
+
+        // Başlangıç çizimi
+        drawBird();
+
+        // --- WEB SERIAL API (SENSÖR BAĞLANTISI) ---
+        let port;
+        let reader;
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                statusDiv.innerText = "Bağlandı! Oyun Başlıyor...";
+                statusDiv.style.color = "#2ecc71";
+                connectBtn.disabled = true;
+                
+                // Oyunu başlat
+                resetGame();
+                readLoop();
+
+            } catch (err) {
+                statusDiv.innerText = "Hata: Bağlanılamadı.";
+                statusDiv.style.color = "#e74c3c";
+                console.error(err);
+            }
+        });
+
+        async function readLoop() {
+            const textDecoder = new TextDecoderStream();
+            port.readable.pipeTo(textDecoder.writable);
+            reader = textDecoder.readable.getReader();
+
+            let buffer = "";
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += value;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // Tamamlanmamış parçayı geri koy
+
+                    for (const line of lines) {
+                        const parts = line.split('\t').map(item => item.trim()).filter(item => item !== "");
+                        if (parts.length >= 5) {
+                            const p = parseFloat(parts[3]); // EKF Pitch değeri (4. sütun)
+                            if (!isNaN(p)) {
+                                sensorPitch = p; // Oyundaki uçağı hareket ettirecek ana değişken
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error("Seri port okuma hatası:", error);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Savaş Pilotu: Ova Görevi</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        
+        #top-panel { position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 10px; pointer-events: auto; color: white; border: 2px solid #2ecc71; }
+        button { background: #2ecc71; border: none; padding: 10px 20px; font-size: 16px; font-weight: bold; border-radius: 5px; cursor: pointer; color: white; margin-bottom: 10px; width: 100%; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        
+        #hud { position: absolute; top: 20px; right: 30px; text-align: right; color: white; text-shadow: 2px 2px 0 #000; }
+        .score { font-size: 40px; font-weight: bold; color: #f1c40f; }
+        .health { font-size: 24px; color: #e74c3c; margin-top: 10px; }
+        
+        #game-over { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; background: rgba(0,0,0,0.9); padding: 40px; border-radius: 20px; border: 3px solid #e74c3c; pointer-events: auto; color: white; }
+        #game-over h1 { color: #e74c3c; margin-top: 0; font-size: 50px; }
+        #restart-btn { background: #e67e22; margin-top: 20px; font-size: 20px; padding: 15px; }
+
+        .crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; border: 2px solid rgba(46, 204, 113, 0.5); border-radius: 50%; }
+        .crosshair::before { content: ''; position: absolute; top: 50%; left: 10%; width: 80%; height: 2px; background: rgba(46, 204, 113, 0.5); transform: translateY(-50%); }
+        .crosshair::after { content: ''; position: absolute; left: 50%; top: 10%; width: 2px; height: 80%; background: rgba(46, 204, 113, 0.5); transform: translateX(-50%); }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="top-panel">
+            <button id="connectBtn">🎮 Sensöre Bağlan</button>
+            <div id="status" style="color: #f1c40f;">Bağlantı bekleniyor...</div>
+            <div style="margin-top: 10px; font-size: 12px; color: #ccc;">
+                <b>Kontrol:</b> Sensörü sağa/sola ve<br>yukarı/aşağı yatırın.
+            </div>
+        </div>
+
+        <div id="hud">
+            <div class="score">SKOR: <span id="scoreVal">0</span></div>
+            <div class="health">CAN: <span id="healthVal">❤❤❤</span></div>
+        </div>
+
+        <div class="crosshair"></div>
+
+        <div id="game-over">
+            <h1>VURULDUN!</h1>
+            <p style="font-size: 24px;">Toplam Skor: <span id="final-score">0</span></p>
+            <button id="restart-btn">Yeniden Doğ</button>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- THREE.JS SAHNE KURULUMU ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Gökyüzü mavisi
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 150); // Uzaklık sisi
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+        camera.position.set(0, 5, 10);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // Işıklar
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 50, 20);
+        scene.add(dirLight);
+
+        // Yeşil Ova (Zemin)
+        const groundGeo = new THREE.PlaneGeometry(500, 500, 10, 10);
+        const groundMat = new THREE.MeshLambertMaterial({ color: 0x27ae60 });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -10;
+        scene.add(ground);
+
+        // --- OYUN OBJELERİ & DEĞİŞKENLER ---
+        let gameActive = false;
+        let score = 0;
+        let health = 3;
+        let lastShootTime = 0;
+        
+        let playerRoll = 0;
+        let playerPitch = 0;
+        
+        // Listeler
+        const playerLasers = [];
+        const enemyLasers = [];
+        const enemies = [];
+        const meteors = [];
+
+        // Oyuncu Uçağı
+        const playerPlane = new THREE.Group();
+        const bodyMat = new THREE.MeshPhongMaterial({ color: 0x3498db }); // Mavi
+        const wingMat = new THREE.MeshPhongMaterial({ color: 0xecf0f1 });
+        
+        // Basit uçak şekli
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 4, 8).rotateX(Math.PI/2), bodyMat);
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(6, 0.2, 1.5), wingMat);
+        const tail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 1), bodyMat);
+        tail.position.set(0, 0.75, 1.5);
+        
+        playerPlane.add(body);
+        playerPlane.add(wing);
+        playerPlane.add(tail);
+        playerPlane.position.set(0, 0, 0); // Orijin
+        scene.add(playerPlane);
+
+        // Hedef Pozisyon (Sensörden gelecek)
+        let targetX = 0;
+        let targetY = 0;
+
+        // --- MATERYALLER ---
+        const enemyMat = new THREE.MeshPhongMaterial({ color: 0xe74c3c }); // Kırmızı uçaklar
+        const meteorMat = new THREE.MeshPhongMaterial({ color: 0x7f8c8d }); // Gri kayalar
+        const pLaserMat = new THREE.MeshBasicMaterial({ color: 0x2ecc71 }); // Oyuncu lazeri yeşil
+        const eLaserMat = new THREE.MeshBasicMaterial({ color: 0xff0000 }); // Düşman lazeri kırmızı
+
+        // --- OYUN FONKSİYONLARI ---
+
+        function updateHUD() {
+            document.getElementById('scoreVal').innerText = score;
+            let hStr = "";
+            for(let i=0; i<health; i++) hStr += "❤";
+            document.getElementById('healthVal').innerText = hStr;
+        }
+
+        function createLaser(position, isPlayer) {
+            const geo = new THREE.CylinderGeometry(0.1, 0.1, 2, 8).rotateX(Math.PI/2);
+            const mesh = new THREE.Mesh(geo, isPlayer ? pLaserMat : eLaserMat);
+            mesh.position.copy(position);
+            scene.add(mesh);
+            if (isPlayer) playerLasers.push(mesh);
+            else enemyLasers.push(mesh);
+        }
+
+        function spawnEnemy() {
+            // Düşman uçağı
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(3, 1, 3), enemyMat);
+            // Geniş alanda rastgele spawn (Kolay nişan için büyük yapıyoruz)
+            mesh.position.set((Math.random() - 0.5) * 40, (Math.random() - 0.5) * 30 + 5, -100);
+            
+            // Düşman özellikleri
+            mesh.userData = {
+                lastShoot: Date.now() + Math.random() * 2000,
+                speed: 0.3 + Math.random() * 0.2 // Size doğru gelme hızı
+            };
+            scene.add(mesh);
+            enemies.push(mesh);
+        }
+
+        function spawnMeteor() {
+            // Yok edilemez kaya
+            const size = 2 + Math.random() * 4;
+            // DodecahedronGeometry ile kayamsı bir şekil
+            const mesh = new THREE.Mesh(new THREE.DodecahedronGeometry(size, 0), meteorMat);
+            mesh.position.set((Math.random() - 0.5) * 50, (Math.random() - 0.5) * 30 + 5, -120);
+            
+            mesh.userData = {
+                rotSpeedX: (Math.random() - 0.5) * 0.05,
+                rotSpeedY: (Math.random() - 0.5) * 0.05,
+                speed: 0.5 + Math.random() * 0.4
+            };
+            scene.add(mesh);
+            meteors.push(mesh);
+        }
+
+        function removeObject(mesh, array) {
+            scene.remove(mesh);
+            const index = array.indexOf(mesh);
+            if (index > -1) array.splice(index, 1);
+        }
+
+        // Hitbox'u kolaylaştırmak için mesafe kontrolü (Geniş Hitbox)
+        function checkCollision(obj1, obj2, hitRadius) {
+            return obj1.position.distanceTo(obj2.position) < hitRadius;
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('game-over').style.display = 'block';
+        }
+
+        function resetGame() {
+            // Sahnedeki tüm objeleri temizle
+            [...playerLasers, ...enemyLasers, ...enemies, ...meteors].forEach(obj => scene.remove(obj));
+            playerLasers.length = 0; enemyLasers.length = 0; enemies.length = 0; meteors.length = 0;
+            
+            score = 0;
+            health = 3;
+            playerPlane.position.set(0, 0, 0);
+            updateHUD();
+            
+            document.getElementById('game-over').style.display = 'none';
+            gameActive = true;
+        }
+
+        // --- ANA OYUN DÖNGÜSÜ ---
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!gameActive) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            const now = Date.now();
+
+            // 1. OYUNCU HAREKETİ (Sensör verilerinden gelen targetX/Y'ye yumuşak geçiş)
+            playerPlane.position.x += (targetX - playerPlane.position.x) * 0.1;
+            playerPlane.position.y += (targetY - playerPlane.position.y) * 0.1;
+            
+            // Görsel olarak uçağı yatır
+            playerPlane.rotation.z = (targetX - playerPlane.position.x) * -0.1; // Sağa giderken sağa yat
+            playerPlane.rotation.x = (targetY - playerPlane.position.y) * 0.1;  // Yukarı giderken burnu kaldır
+
+            // Kamera uçağı hafif geriden takip etsin
+            camera.position.x = playerPlane.position.x * 0.5;
+            camera.position.y = playerPlane.position.y * 0.5 + 5;
+
+            // Zemin animasyonu (Sanki ileri uçuyormuşuz gibi)
+            ground.position.z += 1;
+            if(ground.position.z > 50) ground.position.z = 0;
+
+            // 2. OTOMATİK ATEŞ ETME
+            if (now - lastShootTime > 300) { // 300ms'de bir ateş
+                // İki kanattan ateş
+                const leftPos = playerPlane.position.clone().add(new THREE.Vector3(-2.5, 0, -2));
+                const rightPos = playerPlane.position.clone().add(new THREE.Vector3(2.5, 0, -2));
+                createLaser(leftPos, true);
+                createLaser(rightPos, true);
+                lastShootTime = now;
+            }
+
+            // 3. LAZER HAREKETLERİ & ÇARPIŞMALAR
+            
+            // Oyuncu Lazerleri (İleri gider)
+            for (let i = playerLasers.length - 1; i >= 0; i--) {
+                let l = playerLasers[i];
+                l.position.z -= 2; // Lazer hızı
+                
+                let hit = false;
+                
+                // Düşman uçaklarına çarpma kontrolü (Geniş hitbox = 4 birim)
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    if (checkCollision(l, enemies[j], 4)) {
+                        removeObject(enemies[j], enemies); // Düşmanı sil
+                        hit = true;
+                        score += 10;
+                        updateHUD();
+                        break;
+                    }
+                }
+
+                // Meteorlara çarpma (Sadece lazer yok olur, meteor kalır)
+                if (!hit) {
+                    for (let j = 0; j < meteors.length; j++) {
+                        if (checkCollision(l, meteors[j], 4)) {
+                            hit = true; break;
+                        }
+                    }
+                }
+
+                if (hit || l.position.z < -150) {
+                    removeObject(l, playerLasers);
+                }
+            }
+
+            // Düşman Lazerleri (Geri, oyuncuya doğru gider)
+            for (let i = enemyLasers.length - 1; i >= 0; i--) {
+                let l = enemyLasers[i];
+                l.position.z += 1.5;
+                
+                if (checkCollision(l, playerPlane, 3)) { // Uçağımıza çarptı
+                    health--;
+                    updateHUD();
+                    removeObject(l, enemyLasers);
+                    if (health <= 0) gameOver();
+                } else if (l.position.z > 20) {
+                    removeObject(l, enemyLasers);
+                }
+            }
+
+            // 4. DÜŞMANLARIN HAREKETİ VE ATEŞ ETMESİ
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                let e = enemies[i];
+                e.position.z += e.userData.speed; // Bize doğru yaklaş
+
+                // Düşman ateş etmesi
+                if (now - e.userData.lastShoot > 2000 && e.position.z > -80 && e.position.z < -10) {
+                    createLaser(e.position.clone().add(new THREE.Vector3(0, 0, 2)), false);
+                    e.userData.lastShoot = now + Math.random() * 2000;
+                }
+
+                // Oyuncuya çarpma (Kamikaze)
+                if (checkCollision(e, playerPlane, 4)) {
+                    health--; updateHUD();
+                    removeObject(e, enemies);
+                    if (health <= 0) gameOver();
+                } else if (e.position.z > 20) { // Arkaya geçti, sil
+                    removeObject(e, enemies);
+                }
+            }
+
+            // 5. METEOR HAREKETLERİ
+            for (let i = meteors.length - 1; i >= 0; i--) {
+                let m = meteors[i];
+                m.position.z += m.userData.speed;
+                m.rotation.x += m.userData.rotSpeedX;
+                m.rotation.y += m.userData.rotSpeedY;
+
+                // Oyuncuya çarpma
+                if (checkCollision(m, playerPlane, 5)) {
+                    health = 0; updateHUD(); gameOver(); // Meteor tek atar
+                } else if (m.position.z > 20) {
+                    removeObject(m, meteors);
+                }
+            }
+
+            // 6. YENİ DÜŞMAN/METEOR SPAWN (Rastgele)
+            if (Math.random() < 0.02) spawnEnemy();
+            if (Math.random() < 0.01) spawnMeteor();
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Pencere Boyutlandırma
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        document.getElementById('restart-btn').addEventListener('click', () => {
+            if (port && port.readable) resetGame();
+            else alert("Lütfen önce sensöre bağlanın!");
+        });
+
+        // --- WEB SERIAL API ---
+        let port;
+        let reader;
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                statusDiv.innerText = "Bağlandı! İyi uçuşlar pilot!";
+                statusDiv.style.color = "#2ecc71";
+                connectBtn.disabled = true;
+                
+                resetGame();
+                readLoop();
+            } catch (err) {
+                statusDiv.innerText = "Bağlantı iptal edildi/hata.";
+                statusDiv.style.color = "#e74c3c";
+            }
+        });
+
+        async function readLoop() {
+            const textDecoder = new TextDecoderStream();
+            port.readable.pipeTo(textDecoder.writable);
+            reader = textDecoder.readable.getReader();
+            let buffer = "";
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += value;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); 
+
+                    for (const line of lines) {
+                        const parts = line.split('\t').map(item => item.trim()).filter(item => item !== "");
+                        if (parts.length >= 5) {
+                            const r = parseFloat(parts[2]); // Roll
+                            const p = parseFloat(parts[3]); // Pitch
+                            
+                            if (!isNaN(r) && !isNaN(p)) {
+                                // Sensör verilerini oyun koordinatlarına dönüştür
+                                // Sensörü sağa/sola eğince (Roll) gemi X ekseninde hareket etsin
+                                // Sınırlar: Roll -45 ile +45 -> X -20 ile +20
+                                targetX = (r / 45) * 20; 
+                                targetX = Math.max(-20, Math.min(20, targetX));
+
+                                // Sensörü öne/arkaya eğince (Pitch) gemi Y ekseninde hareket etsin
+                                // Burnunu kaldırma (+ pitch) -> Yukarı git (+Y)
+                                targetY = (p / 45) * 15;
+                                targetY = Math.max(-5, Math.min(15, targetY)); // Yere çarpmamak için alt sınır -5
+                            }
+                        }
+                    }
+                }
+            } catch (error) {}
+        }
+    </script>
+</body>
+</html>

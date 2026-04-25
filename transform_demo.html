@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sinyal Transformasyon Analizi</title>
+    <style>
+        body {
+            margin: 0; padding: 20px;
+            background-color: #111;
+            color: #ecf0f1;
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 { color: #3498db; margin-bottom: 5px; }
+        p { color: #95a5a6; max-width: 600px; text-align: center; }
+        
+        .panel {
+            background: #222;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #444;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .bar-container {
+            width: 100%; height: 30px;
+            background: #333;
+            position: relative;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .bar-center {
+            position: absolute; left: 50%; top: 0; bottom: 0;
+            width: 2px; background: rgba(255,255,255,0.5); z-index: 5;
+        }
+        .bar-fill {
+            height: 100%; position: absolute; left: 50%;
+            transition: all 0.05s linear;
+        }
+        .bar-fill.raw { background: #e74c3c; } /* Kırmızı (Kötü sinyal) */
+        .bar-fill.clean { background: #2ecc71; transition: all 0.2s ease-out; } /* Yeşil (Temiz sinyal) */
+
+        .status-box {
+            display: flex; justify-content: space-around; margin-top: 20px;
+        }
+        .state-indicator {
+            padding: 15px 30px;
+            border-radius: 8px;
+            background: #333;
+            font-weight: bold;
+            font-size: 24px;
+            color: #555;
+            transition: all 0.2s;
+            border: 2px solid #444;
+        }
+        .state-indicator.active {
+            background: #3498db;
+            color: white;
+            border-color: #2980b9;
+            box-shadow: 0 0 15px #3498db;
+            transform: scale(1.1);
+        }
+
+        button {
+            background: #f39c12; border: none; padding: 12px 24px;
+            font-size: 16px; font-weight: bold; border-radius: 5px;
+            cursor: pointer; color: white; margin-bottom: 20px;
+        }
+        button:disabled { background: #555; cursor: not-allowed; }
+        
+        .math-text { font-family: monospace; color: #f1c40f; background: #000; padding: 10px; border-radius: 5px; }
+
+    </style>
+</head>
+<body>
+
+    <h1>Sinyal Transform & Histerezis</h1>
+    <p>Sensörünüzdeki kötü titremeleri ve kısa kablo sorununu "Ölü Bölge" (Deadzone) ve "Histerezis" matematiği kullanarak tertemiz bir dijital sinyale (Sadece SOL-SAĞ tuşu gibi) çeviriyoruz.</p>
+
+    <button id="connectBtn">🔌 Sensöre Bağlan</button>
+    <div id="status" style="margin-bottom: 20px; color: #e74c3c;">Bağlantı Bekleniyor...</div>
+
+    <div class="panel">
+        <h3>1. Ham Sensör Verisi (Kötü Setup)</h3>
+        <div style="display: flex; justify-content: space-between; color: #aaa;">
+            <span>-40°</span><span>0° (Titriyor)</span><span>+40°</span>
+        </div>
+        <div class="bar-container">
+            <div class="bar-center"></div>
+            <div class="bar-fill raw" id="bar-raw" style="width: 0%;"></div>
+        </div>
+        <div class="math-text">Okunan: <span id="val-raw">0.00</span>°</div>
+    </div>
+
+    <div class="panel">
+        <h3>2. Matematiksel Transformasyon (Temiz Sinyal)</h3>
+        <p style="font-size: 12px; color: #aaa;">Formül: Eğer açı -10 ile +10 arasındaysa (Ölü Bölge) = 0 kabul et. İvme süzgeci (Low-pass) uygula.</p>
+        <div class="bar-container">
+            <div class="bar-center"></div>
+            <div class="bar-fill clean" id="bar-clean" style="width: 0%;"></div>
+        </div>
+        <div class="math-text">Filtrelenmiş: <span id="val-clean">0.00</span>°</div>
+    </div>
+
+    <div class="panel">
+        <h3>3. Dijital Çıktı (Histerezis Kararı)</h3>
+        <p style="font-size: 12px; color: #aaa;">Karar Mekanizması: Açı 15'i geçmeden SAĞ deme. SAĞ dedikten sonra 5'in altına düşmeden bırakma (Titreme engeli).</p>
+        <div class="status-box">
+            <div class="state-indicator" id="state-left">◀ SOLA YATTI</div>
+            <div class="state-indicator active" id="state-center">MERKEZ</div>
+            <div class="state-indicator" id="state-right">SAĞA YATTI ▶</div>
+        </div>
+    </div>
+
+    <script>
+        // --- MATEMATİK & FİLTRE DEĞİŞKENLERİ ---
+        const DEADZONE = 8; // -8 ile +8 derece arası 0 kabul edilecek
+        const THRESHOLD_HIGH = 15; // Bu açıyı geçince yön değişir
+        const THRESHOLD_LOW = 5; // Bu açının altına inince merkeze döner (Histerezis farkı)
+        const ALPHA = 0.2; // Low-pass filter katsayısı (0.1 çok yavaş, 0.9 çok hızlı)
+
+        let filteredRoll = 0;
+        let currentState = "CENTER"; // "LEFT", "CENTER", "RIGHT"
+
+        // UI Elementleri
+        const bRaw = document.getElementById('bar-raw');
+        const bClean = document.getElementById('bar-clean');
+        const vRaw = document.getElementById('val-raw');
+        const vClean = document.getElementById('val-clean');
+        
+        const sLeft = document.getElementById('state-left');
+        const sCenter = document.getElementById('state-center');
+        const sRight = document.getElementById('state-right');
+
+        function updateUI(rawRoll) {
+            // 1. HAM VERİ GÖSTERİMİ
+            vRaw.innerText = rawRoll.toFixed(2);
+            let rawPct = (rawRoll / 40) * 100;
+            rawPct = Math.max(-100, Math.min(100, rawPct));
+            if(rawPct < 0) {
+                bRaw.style.left = (50 + rawPct/2) + "%";
+                bRaw.style.width = Math.abs(rawPct/2) + "%";
+            } else {
+                bRaw.style.left = "50%";
+                bRaw.style.width = (rawPct/2) + "%";
+            }
+
+            // 2. MATEMATİKSEL FİLTRELEME
+            
+            // A) Low-pass Filter (Yumuşatma)
+            filteredRoll = (ALPHA * rawRoll) + ((1 - ALPHA) * filteredRoll);
+            
+            // B) Deadzone (Ölü Bölge Uygulaması)
+            let cleanRoll = filteredRoll;
+            if (Math.abs(cleanRoll) < DEADZONE) {
+                cleanRoll = 0; // Kablonun veya elin küçük titremelerini yok et
+            } else {
+                // Deadzone dışına çıkınca zıplama olmaması için ofset verilir
+                cleanRoll = cleanRoll > 0 ? cleanRoll - DEADZONE : cleanRoll + DEADZONE;
+            }
+
+            vClean.innerText = cleanRoll.toFixed(2);
+            let cleanPct = (cleanRoll / (40 - DEADZONE)) * 100;
+            cleanPct = Math.max(-100, Math.min(100, cleanPct));
+            if(cleanPct < 0) {
+                bClean.style.left = (50 + cleanPct/2) + "%";
+                bClean.style.width = Math.abs(cleanPct/2) + "%";
+            } else {
+                bClean.style.left = "50%";
+                bClean.style.width = (cleanPct/2) + "%";
+            }
+
+            // 3. HİSTEREZİS (SCHMITT TRIGGER) KARAR MEKANİZMASI
+            if (currentState === "CENTER") {
+                if (filteredRoll > THRESHOLD_HIGH) setState("RIGHT");
+                else if (filteredRoll < -THRESHOLD_HIGH) setState("LEFT");
+            } 
+            else if (currentState === "RIGHT") {
+                // Merkeze dönmesi için sadece THRESHOLD_HIGH'in altına inmesi yetmez,
+                // THRESHOLD_LOW'un da altına inmesi gerekir (Titremeyi engeller)
+                if (filteredRoll < THRESHOLD_LOW) setState("CENTER");
+            } 
+            else if (currentState === "LEFT") {
+                if (filteredRoll > -THRESHOLD_LOW) setState("CENTER");
+            }
+        }
+
+        function setState(newState) {
+            currentState = newState;
+            sLeft.classList.remove('active');
+            sCenter.classList.remove('active');
+            sRight.classList.remove('active');
+
+            if (newState === "LEFT") sLeft.classList.add('active');
+            else if (newState === "RIGHT") sRight.classList.add('active');
+            else sCenter.classList.add('active');
+        }
+
+        // --- WEB SERIAL API ---
+        let port, reader, keepReading = true;
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                statusDiv.innerText = "Bağlandı! Sinyal işleniyor...";
+                statusDiv.style.color = "#2ecc71";
+                connectBtn.disabled = true;
+                keepReading = true; readLoop();
+            } catch (err) {
+                statusDiv.innerText = "Bağlantı Hatası: " + err.message;
+            }
+        });
+
+        async function readLoop() {
+            const textDecoder = new TextDecoderStream();
+            port.readable.pipeTo(textDecoder.writable);
+            reader = textDecoder.readable.getReader();
+            let buffer = "";
+            try {
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += value;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); 
+
+                    for (const line of lines) {
+                        const parts = line.split('\t').map(item => item.trim()).filter(item => item !== "");
+                        if (parts.length >= 5) {
+                            const r = parseFloat(parts[2]); // EKF Roll
+                            if (!isNaN(r)) {
+                                updateUI(r); // Matematik işlemini uygula
+                            }
+                        }
+                    }
+                }
+            } catch (error) {}
+        }
+    </script>
+</body>
+</html>
